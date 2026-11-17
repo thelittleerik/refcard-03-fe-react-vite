@@ -21,4 +21,12 @@ RUN npm run build
 FROM nginx:1.27-alpine
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Von der Pipeline gesetzt (Git-Tag bzw. Commit) und unter /version.json sichtbar.
+ARG APP_VERSION=dev
+ARG APP_COMMIT=unknown
+RUN printf '{"version":"%s","commit":"%s"}\n' "$APP_VERSION" "$APP_COMMIT" > /usr/share/nginx/html/version.json
+
 EXPOSE 80
+HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1/healthz || exit 1
