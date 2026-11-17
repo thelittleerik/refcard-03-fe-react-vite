@@ -1,0 +1,60 @@
+name: AWS-Login (Learner Lab)
+description: >
+  Meldet den Job mit den temporären Zugangsdaten der AWS-Academy-Learner-Lab-Session an
+  und bricht mit einer verständlichen Meldung ab, wenn die Secrets fehlen oder abgelaufen sind.
+
+inputs:
+  aws-access-key-id:
+    description: Secret AWS_ACCESS_KEY_ID
+    required: true
+  aws-secret-access-key:
+    description: Secret AWS_SECRET_ACCESS_KEY
+    required: true
+  aws-session-token:
+    description: Secret AWS_SESSION_TOKEN
+    required: true
+  aws-region:
+    description: AWS-Region
+    required: true
+
+outputs:
+  account-id:
+    description: ID des AWS-Accounts der Lab-Session
+    value: ${{ steps.verify.outputs.account-id }}
+
+runs:
+  using: composite
+  steps:
+    - name: Secrets vorhanden?
+      shell: bash
+      env:
+        KEY_ID: ${{ inputs.aws-access-key-id }}
+        SECRET_KEY: ${{ inputs.aws-secret-access-key }}
+        SESSION_TOKEN: ${{ inputs.aws-session-token }}
+      run: |
+        missing=()
+        [[ -n "$KEY_ID" ]] || missing+=("AWS_ACCESS_KEY_ID")
+        [[ -n "$SECRET_KEY" ]] || missing+=("AWS_SECRET_ACCESS_KEY")
+        [[ -n "$SESSION_TOKEN" ]] || missing+=("AWS_SESSION_TOKEN")
+        if (( ${#missing[@]} )); then
+          echo "::error title=GitHub Secrets fehlen::Nicht gesetzt: ${missing[*]}. Werte aus dem Learner Lab (AWS Details -> AWS CLI) mit scripts/refresh-lab-secrets.sh hinterlegen."
+          exit 1
+        fi
+
+    - name: Zugangsdaten konfigurieren
+      uses: aws-actions/configure-aws-credentials@v6
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-session-token: ${{ inputs.aws-session-token }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Lab-Session noch gültig?
+      id: verify
+      shell: bash
+      run: |
+        if ! account=$(aws sts get-caller-identity --query Account --output text 2>/tmp/sts-error); then
+          echo "::error title=Learner-Lab-Session abgelaufen::AWS lehnt die hinterlegten Zugangsdaten ab ($(tr '\n' ' ' </tmp/sts-error)). Lab neu starten und die drei Secrets mit scripts/refresh-lab-secrets.sh aktualisieren, danach den Workflow erneut ausführen."
+          exit 1
+        fi
+        echo "account-id=$account" >> "$GITHUB_OUTPUT"

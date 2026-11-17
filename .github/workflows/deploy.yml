@@ -1,29 +1,49 @@
-name: CI/CD auf AWS ECS
+name: CI/CD Frontend
 
+# main          -> Image sha-<commit> + main, Deployment auf ECS
+# Tag vX.Y.Z    -> Image X.Y.Z + X.Y + latest, Deployment auf ECS
+# Pull Request  -> nur Test und Build
 on:
   push:
     branches: [main]
+    tags: ['v*.*.*']
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 env:
   NODE_VERSION: '24'
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: biztrips-frontend
+  ECS_CLUSTER: biztrips-cluster
+  ECS_SERVICE: biztrips-frontend-service
+  CONTAINER_NAME: biztrips-frontend
+  ALB_NAME: biztrips-alb
 
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
       - name: Abhängigkeiten installieren
         run: npm ci
+
+      - name: Lint
+        run: npm run lint
 
       - name: Tests ausführen
         run: npm test
@@ -33,9 +53,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -50,61 +70,202 @@ jobs:
           VITE_IMGS: ${{ vars.VITE_IMGS || 'items' }}
 
       - name: Build-Artefakt hochladen
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
           retention-days: 7
 
-  deploy-ecs:
-    name: Image nach ECR pushen und ECS-Service aktualisieren
+  image:
+    name: Image → ECR
     runs-on: ubuntu-latest
     needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    permissions:
-      contents: read
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
-      # Learner Lab: kein OIDC möglich, daher die temporären Session-Credentials als Secrets.
-      - name: AWS-Credentials aus Learner-Lab-Session beziehen
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Backend-URL gesetzt?
+        env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+        run: |
+          if [[ -z "$VITE_API_BASE_URL" ]]; then
+            echo "::error title=Repository-Variable fehlt::VITE_API_BASE_URL ist nicht gesetzt. Vite kompiliert die Backend-URL fest ins Bundle - ohne sie würde das Image http://localhost:8080 ansprechen. Setzen mit: gh variable set VITE_API_BASE_URL --body 'http://<alb-dns>/'"
+            exit 1
+          fi
+          if [[ "$VITE_API_BASE_URL" != */ ]]; then
+            echo "::error title=Repository-Variable ungültig::VITE_API_BASE_URL ('$VITE_API_BASE_URL') muss mit '/' enden, da der Code den Pfad direkt anhängt (\${baseUrl}v1/trips)."
+            exit 1
+          fi
+
+      - name: Version bestimmen
+        id: version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error title=Ungültiger Release-Tag::'$GITHUB_REF_NAME' ist keine SemVer-Version. Erwartet wird vMAJOR.MINOR.PATCH, z. B. v1.2.0."
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error title=Release-Tag ausserhalb von main::Der Tag $GITHUB_REF_NAME zeigt auf einen Commit, der nicht in main enthalten ist. Releases werden nur von main erstellt."
+              exit 1
+            fi
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="sha-${GITHUB_SHA::7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Version: $version"
+
+      - name: Bei AWS anmelden (Learner Lab)
+        uses: ./.github/actions/aws-learner-lab-login
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Bei ECR anmelden
-        id: ecr-login
+        id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Image bauen und nach ECR pushen
-        env:
-          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
-          ECR_REPOSITORY: biztrips
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          docker build \
-            --build-arg VITE_API_BASE_URL="${{ vars.VITE_API_BASE_URL }}" \
-            --build-arg VITE_IMGS="${{ vars.VITE_IMGS || 'items' }}" \
-            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
-            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" .
-          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+      - name: Image-Tags ableiten
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=main,enable={{is_default_branch}}
 
-      - name: Task-Definition mit neuem Image aktualisieren
-        id: render-task-def
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Image bauen und pushen
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VITE_API_BASE_URL=${{ vars.VITE_API_BASE_URL }}
+            VITE_IMGS=${{ vars.VITE_IMGS || 'items' }}
+            APP_VERSION=${{ steps.version.outputs.version }}
+            APP_COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Zusammenfassung
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "### Image in ECR"
+            echo
+            echo "Repository \`$ECR_REPOSITORY\`, Version \`${{ steps.version.outputs.version }}\`, Backend-URL \`${{ vars.VITE_API_BASE_URL }}\`"
+            echo
+            echo '```'
+            while read -r tag; do echo "${tag##*/}"; done <<<"$TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy → ECS
+    runs-on: ubuntu-latest
+    needs: image
+    # Deployments nie parallel und nie abbrechen: ein halb ausgerolltes Deployment wäre schlimmer als Warten.
+    concurrency:
+      group: deploy-frontend
+      cancel-in-progress: false
+    outputs:
+      url: ${{ steps.alb.outputs.url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Bei AWS anmelden (Learner Lab)
+        id: aws
+        uses: ./.github/actions/aws-learner-lab-login
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: ECS-Service vorhanden?
+        run: |
+          status=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query 'services[0].status' --output text)
+          if [[ "$status" != "ACTIVE" ]]; then
+            echo "::error title=ECS-Service fehlt::Service '$ECS_SERVICE' im Cluster '$ECS_CLUSTER' ist nicht aktiv (Status: $status). Infrastruktur einmalig mit infra/setup-aws.sh anlegen."
+            exit 1
+          fi
+
+      - name: Task-Definition mit neuem Image rendern
+        id: render
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
           task-definition: task-definition.json
-          container-name: biztrips
-          image: ${{ steps.ecr-login.outputs.registry }}/biztrips:${{ github.sha }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.aws.outputs.account-id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ needs.image.outputs.version }}
 
-      - name: ECS-Service deployen
+      - name: ECS-Service deployen (Rolling Deployment)
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
-          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
-          cluster: biztrips-cluster
-          service: biztrips-service
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECS_SERVICE }}
+          desired-count: ${{ vars.ECS_DESIRED_COUNT || 2 }}
           wait-for-service-stability: true
+          wait-for-minutes: 15
+
+      - name: Adresse des Load Balancers ermitteln
+        id: alb
+        run: |
+          dns=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" --query 'LoadBalancers[0].DNSName' --output text)
+          echo "url=http://$dns" >> "$GITHUB_OUTPUT"
+
+      - name: Diagnose bei fehlgeschlagenem Deployment
+        if: failure()
+        run: |
+          echo "::group::Letzte Service-Events"
+          aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query 'services[0].events[:10].[createdAt,message]' --output text || true
+          echo "::endgroup::"
+          echo "::group::Zuletzt gestoppte Tasks"
+          tasks=$(aws ecs list-tasks --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" \
+            --desired-status STOPPED --query 'taskArns[:5]' --output text || true)
+          if [[ -n "$tasks" && "$tasks" != "None" ]]; then
+            read -ra task_arns <<<"$tasks"
+            aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "${task_arns[@]}" \
+              --query 'tasks[].[stoppedReason,containers[0].reason,containers[0].exitCode]' --output text || true
+          fi
+          echo "::endgroup::"
+          echo "::error title=Deployment fehlgeschlagen::Der Service '$ECS_SERVICE' wurde nicht stabil. Ursache steht in den Gruppen 'Letzte Service-Events' / 'Zuletzt gestoppte Tasks' und in CloudWatch (/ecs/biztrips-frontend)."
+
+  verify:
+    name: Smoke-Test
+    runs-on: ubuntu-latest
+    needs: [image, deploy]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Ausgeliefertes Frontend prüfen
+        run: ./scripts/smoke-test.sh "${{ needs.deploy.outputs.url }}" "${{ github.sha }}"
+
+      - name: Zusammenfassung
+        run: |
+          {
+            echo "### Deployment verifiziert"
+            echo
+            echo "- Version: \`${{ needs.image.outputs.version }}\` (Commit \`${GITHUB_SHA::7}\`)"
+            echo "- Applikation: ${{ needs.deploy.outputs.url }}"
+            echo "- Geprüft: Health, ausgelieferte Version, Startseite, JS-Bundle"
+          } >> "$GITHUB_STEP_SUMMARY"
