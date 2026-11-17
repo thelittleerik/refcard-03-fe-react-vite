@@ -3,6 +3,7 @@ import "bootstrap/dist/css/bootstrap.min.css";
 import "./App.css";
 import Wishlist from "./components/Wishlist";
 import TripList from "./components/TripList";
+import EmployeeList from "./components/EmployeeList";
 import {useWishlist} from "./components/wishlistContext.jsx";
 
 export default function App() {
@@ -14,6 +15,7 @@ export default function App() {
             </header>
             <Wishlist/>
             <TripList/>
+            <EmployeeList/>
             <WishlistTest/>
             <footer>only for educational purposes @BBW 2026</footer>
         </div>
