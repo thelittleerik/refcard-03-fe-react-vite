@@ -2,13 +2,18 @@
 # Prüft ein laufendes Frontend von aussen: Health, ausgelieferte Version, Startseite und JS-Bundle.
 # Wird von der Pipeline nach jedem Deployment ausgeführt und funktioniert genauso gegen localhost.
 #
-#   ./scripts/smoke-test.sh <basis-url> [erwarteter-commit]
-#   ./scripts/smoke-test.sh http://localhost:8081
+#   ./scripts/smoke-test.sh <basis-url> [erwarteter-commit] [backend-url]
+#   ./scripts/smoke-test.sh http://localhost:3000 "" http://localhost:8080
+#
+# backend-url: Adresse des Backends, falls es nicht unter derselben Adresse wie das Frontend läuft
+# (auf AWS teilen sich beide den Load Balancer, lokal hat das Backend einen eigenen Port).
 set -euo pipefail
 
-BASE_URL=${1:?Aufruf: smoke-test.sh <basis-url> [erwarteter-commit]}
+BASE_URL=${1:?Aufruf: smoke-test.sh <basis-url> [erwarteter-commit] [backend-url]}
 BASE_URL=${BASE_URL%/}
 EXPECTED_COMMIT=${2:-}
+API_URL=${3:-$BASE_URL}
+API_URL=${API_URL%/}
 ATTEMPTS=${SMOKE_ATTEMPTS:-20}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -61,11 +66,11 @@ echo "    ok"
 # Das Backend wird unabhängig deployt. Ist es nicht erreichbar, ist das kein Fehler dieses Deployments -
 # aber ein Hinweis, den man nicht übersehen soll.
 # Der Status allein genügt nicht: ohne Backend-Route beantwortet der SPA-Fallback /v1/trips mit index.html und 200.
-status=$(request "$BASE_URL/v1/trips")
+status=$(request "$API_URL/v1/trips")
 if [[ "$status" == "204" ]] || { [[ "$status" == "200" ]] && jq -e 'type == "array"' "$WORK/body" >/dev/null 2>&1; }; then
-  echo "Backend über dieselbe Adresse erreichbar (/v1/trips -> HTTP $status)."
+  echo "Backend erreichbar ($API_URL/v1/trips -> HTTP $status)."
 else
-  echo "::warning title=Backend nicht erreichbar::/v1/trips liefert keine Trip-Liste (HTTP $status). Das Frontend ist deployt, zeigt aber keine Daten, solange das Backend nicht unter dieser Adresse läuft."
+  echo "::warning title=Backend nicht erreichbar::$API_URL/v1/trips liefert keine Trip-Liste (HTTP $status). Das Frontend ist deployt, zeigt aber keine Daten, solange das Backend nicht unter dieser Adresse läuft."
 fi
 
 echo "Smoke-Test bestanden."
