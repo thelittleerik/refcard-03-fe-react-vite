@@ -1,40 +1,64 @@
-# React + Vite
+# RefCard 05 – Frontend (React + Vite)
 
-## Getting the starting point
+Frontend der BusinessTrips-Applikation: Trips, Wishlist und Mitarbeitende mit Foto-Upload. Der Vite-Build
+wird als nginx-Container auf AWS ECS (Fargate) ausgeliefert.
 
-**Option A — fresh clone at the starting point**
+> **RefCard 05 – Full-Stack auf AWS.** Dieser Fork ist die Abgabe von Erik Oros und Sven Toye.
+> Vorgehen und Nachweise für dieses Repo stehen in [`docs/RefCard05.md`](docs/RefCard05.md), die
+> Gesamtübersicht (Architektur, RDS, S3, IAM) im
+> [Backend-Repo](https://github.com/thelittleerik/RefCard-03-be-SpringBootBusinessTrips/blob/main/docs/RefCard05.md).
+
+## Tech-Stack
+
+- React 19, Vite 8, Bootstrap 5
+- Vitest + Testing Library, ESLint
+- nginx 1.27 (Laufzeit-Image)
+
+## Lokal entwickeln
+
+```bash
+npm ci
+npm run dev        # http://localhost:5173
+```
+
+Die App ruft das Backend unter `VITE_API_BASE_URL` auf (Standard in [`.env`](.env): `http://localhost:8080/`).
+Das Backend muss dafür laufen – am einfachsten zusammen mit Datenbank und Storage über
+[refcard-05-compose](https://github.com/thelittleerik/refcard-05-compose).
+
+```bash
+npm test           # Tests
+npm run lint       # ESLint
+npm run build      # Produktions-Build nach dist/
+```
+
+## Konfiguration
+
+| Variable | Bedeutung |
+| --- | --- |
+| `VITE_API_BASE_URL` | Basis-URL des Backends, **mit** abschliessendem `/`. Der Code hängt den Pfad direkt an (`${baseUrl}v1/trips`). |
+| `VITE_IMGS` | Unterordner von `public/images` für die Trip-Bilder (Standard `items`). |
+
+Vite kompiliert beide Werte beim Build fest ins JavaScript-Bundle. Sie sind deshalb Build-Argumente des
+Images und keine Laufzeit-Variablen des Containers. In der Pipeline kommt `VITE_API_BASE_URL` aus der
+gleichnamigen Repository-Variable; fehlt sie, bricht der Image-Build mit einer Fehlermeldung ab.
+
+## Projektstruktur
+
+```
+src/                           React-Applikation (Komponenten und Tests)
+Dockerfile, nginx.conf         Multi-Stage-Build: Node baut, nginx liefert aus (/healthz, /version.json)
+.github/workflows/deploy.yml   Pipeline: Test → Build → Image nach ECR → Deploy auf ECS → Smoke-Test
+task-definition.json           ECS-Task-Definition (Fargate)
+infra/                         AWS-Infrastruktur des Frontends anlegen und wieder löschen
+scripts/                       Smoke-Test und Erneuern der Learner-Lab-Secrets
+docs/RefCard05.md              Dokumentation der RefCard-05-Lösung
+docs/exercises/                CI/CD-Übungen der Vorlage (EX-01 bis EX-03)
+```
+
+## Ausgangspunkt der Vorlage
+
+Der ursprüngliche Stand der Vorlage ist der Tag `v1-start` im Upstream-Repo:
 
 ```bash
 git clone --branch v1-start https://github.com/bbwlc/refcard-03-fe-react-vite.git
-cd refcard-03-fe-react-vite
-npm install
-npm run dev
 ```
-
-**Option B — you already have the repo cloned**
-
-```bash
-git fetch --tags
-git checkout v1-start
-npm install
-npm run dev
-```
-
-This puts you in a "detached HEAD" state at the tag — fine for exploring, but if you'll commit your own work, branch off it first:
-
-```bash
-git checkout -b my-work v1-start
-```
-
-> The app calls a backend at `http://localhost:8080/v1/trips` (see the `RefCard-03-be-SpringBootBusinessTrips` project), so make sure that's running too for the trip list / wishlist to show real data.
-
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
-
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
